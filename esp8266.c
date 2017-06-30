@@ -1,24 +1,30 @@
-#include <IRremoteESP8266.h>
+#include <IRsend.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <stdlib.h>
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
+#include "DHT.h"
 #define DEBUG 1
+#define DHTTYPE DHT22  // there are multiple kinds of DHT sensors
+#define DHTLOOP 5      // Seconds to check for temperature
+#define DHTPIN 0       // what digital pin the DHT22 is conected to
+#define IRPIN 2        // IR PIN
 const char* ssid = "";
 const char* password = "";
 const char* mqtt_server = "";
+const int mqtt_port = 16825;
 const char* mqtt_user = "";
 const char* mqtt_password = "";
-const int mqtt_port = 16825;
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 
-IRsend irsend(2);
+IRsend irsend(IRPIN);
+DHT dht(DHTPIN, DHTTYPE);
 
-unsigned rawmessage[139];
+int startProgram = 0;
 char mode[10] = "Cool";
 char state[10] = "Off";
 int speed = 0;
@@ -62,17 +68,17 @@ void binaryAddLimit(char* out, char first[], char plus[], int binsize) {
   result[binsize] = '\0';
   i = 0;
   char tmp;
-  while (carrier == 1 && i < binsize) {
-      if (result[i] == '0') {
-          tmp = '1';
-          carrier = 0;
-      }
-      else if (result[i] == '1') {
-          tmp = '0';
-      }
-      result[i] = tmp;
-      i += 1;
-  }
+  // while (carrier == 1 && i < binsize) {
+  //     if (result[i] == '0') {
+  //         tmp = '1';
+  //         carrier = 0;
+  //     }
+  //     else if (result[i] == '1') {
+  //         tmp = '0';
+  //     }
+  //     result[i] = tmp;
+  //     i += 1;
+  // }
   strcpy(out, result);
 }
 
@@ -287,7 +293,7 @@ void getBinCommand(char* out, char state[], char mode[], int speed, char swing[]
   if (DEBUG >= 1)
     printf("%s\n", out);
 }
-void toRaw(unsigned *list, char bindata[]) {
+void toRaw(uint16_t *list, char bindata[]) {
   unsigned n = strlen(bindata);
   //  unsigned n = (unsigned)strlen(bindata);
   //  int size = (n*2) + 3;
@@ -319,6 +325,90 @@ void toRaw(unsigned *list, char bindata[]) {
 }
 
 
+void sendToIR() {
+  printf("\n\n%s - %s - %d - %s - %d - %d \n\n", state, mode, speed, swing, sleep, temp);
+
+  char binCommand[71];
+  uint16_t rawmessage[139];
+  getBinCommand(binCommand, state, mode, speed, swing, sleep, temp);
+  toRaw(rawmessage, binCommand);
+
+  Serial.println("\nSending RAW data... ");
+  irsend.sendRaw(rawmessage, 139, 38);
+}
+
+void callback(char* topic, byte* payload, unsigned int length) {
+  if (startProgram == 1){
+    char mqttmessage[300];
+    Serial.print("Message arrived [");
+    Serial.print(topic);
+    Serial.print("] ");
+    int i;
+    for (i = 0; i < length; i++) {
+      mqttmessage[i] = (char)payload[i];
+      Serial.print((char)payload[i]);
+    }
+    mqttmessage[i] = '\0';
+    printf("\nthe new message as string: %s\n", mqttmessage);
+
+     if (strcmp(topic,"/aircond/myroom/state/set")==0) {
+       strcpy(state, mqttmessage);
+       sendToIR();
+       client.publish("/aircond/myroom/state", state);
+     }
+     else if (strcmp(topic,"/aircond/myroom/mode/set")==0) {
+       if (strcmp(mqttmessage, "Off")==0) {
+         strcpy(state, mqttmessage);
+         client.publish("/aircond/myroom/mode", "Off");
+       } else {
+         strcpy(state, "On");
+         strcpy(mode, mqttmessage);
+         client.publish("/aircond/myroom/mode", mode);
+       }
+       sendToIR();
+     }
+     else if (strcmp(topic,"/aircond/myroom/speed/set")==0) {
+       speed = (int) strtol(mqttmessage, (char **)NULL, 10);
+       sendToIR();
+       char speedstr[5];
+       sprintf(speedstr, "%d", speed);
+       client.publish("/aircond/myroom/speed", speedstr);
+     }
+     else if (strcmp(topic,"/aircond/myroom/swing/set")==0) {
+       strcpy(swing, mqttmessage);
+       sendToIR();
+       client.publish("/aircond/myroom/swing", swing);
+     }
+     else if (strcmp(topic,"/aircond/myroom/sleep/set")==0) {
+       sleep = (int) strtol(mqttmessage, (char **)NULL, 10);
+       sendToIR();
+       char sleepstr[5];
+       sprintf(sleepstr, "%d", sleep);
+       client.publish("/aircond/myroom/sleep", sleepstr);
+     }
+     else if (strcmp(topic,"/aircond/myroom/temp/set")==0) {
+       temp = (int) strtol(mqttmessage, (char **)NULL, 10);
+       sendToIR();
+       char tempstr[5];
+       sprintf(tempstr, "%d", temp);
+       client.publish("/aircond/myroom/temp", tempstr);
+     }
+     else if (strcmp(topic,"/aircond/myroom/getall")==0) {
+       char speedstr[5];
+       char sleepstr[5];
+       char tempstr[5];
+       sprintf(speedstr, "%d", speed);
+       sprintf(sleepstr, "%d", sleep);
+       sprintf(tempstr, "%d", temp);
+       printf("Sending: \nstate: %s,\nmode: %s,\nspeed: %s,\nswing: %s,\nsleep: %s,\ntemp: %s\n", state, mode, speedstr, swing, sleepstr, tempstr);
+       client.publish("/aircond/myroom/temp", tempstr);
+       client.publish("/aircond/myroom/mode", mode);
+       client.publish("/aircond/myroom/speed", speedstr);
+       client.publish("/aircond/myroom/swing", swing);
+       client.publish("/aircond/myroom/sleep", sleepstr);
+     }
+  }
+}
 
 
 void setup_wifi() {
@@ -370,104 +460,76 @@ void reconnect() {
   }
 }
 
-void sendToIR() {
-  printf("\n\n%s - %s - %d - %s - %d - %d \n\n", state, mode, speed, swing, sleep, temp);
-
-  char binCommand[71];
-  getBinCommand(binCommand, state, mode, speed, swing, sleep, temp);
-  toRaw(rawmessage, binCommand);
-
-  Serial.println("\nSending RAW data... ");
-  irsend.sendRaw(rawmessage, 139, 38);
-}
-
-void callback(char* topic, byte* payload, unsigned int length) {
-  char mqttmessage[300];
-  Serial.print("Message arrived [");
-  Serial.print(topic);
-  Serial.print("] ");
-  int i;
-  for (i = 0; i < length; i++) {
-    mqttmessage[i] = (char)payload[i];
-    Serial.print(mqttmessage[i]);
-  }
-  mqttmessage[i] = '\0';
-
-  if (strcmp(topic,"/aircond/myroom/state/set")==0) {
-    strcpy(state, mqttmessage);
-    sendToIR();
-    client.publish("/aircond/myroom/state", state);
-  }
-  else if (strcmp(topic,"/aircond/myroom/mode/set")==0) {
-    if (strcmp(mqttmessage, "Off")==0) {
-      strcpy(state, mqttmessage);
-      client.publish("/aircond/myroom/mode", "Off");
-    } else {
-      strcpy(state, "On");
-      strcpy(mode, mqttmessage);
-      client.publish("/aircond/myroom/mode", mode);
-    }
-    sendToIR();
-  }
-  else if (strcmp(topic,"/aircond/myroom/speed/set")==0) {
-    speed = (int) strtol(mqttmessage, (char **)NULL, 10);
-    sendToIR();
-    char speedstr[5];
-    sprintf(speedstr, "%d", speed);
-    client.publish("/aircond/myroom/speed", speedstr);
-  }
-  else if (strcmp(topic,"/aircond/myroom/swing/set")==0) {
-    strcpy(swing, mqttmessage);
-    sendToIR();
-    client.publish("/aircond/myroom/swing", swing);
-  }
-  else if (strcmp(topic,"/aircond/myroom/sleep/set")==0) {
-    sleep = (int) strtol(mqttmessage, (char **)NULL, 10);
-    sendToIR();
-    char sleepstr[5];
-    sprintf(sleepstr, "%d", sleep);
-    client.publish("/aircond/myroom/sleep", sleepstr);
-  }
-  else if (strcmp(topic,"/aircond/myroom/temp/set")==0) {
-    temp = (int) strtol(mqttmessage, (char **)NULL, 10);
-    sendToIR();
-    char tempstr[5];
-    sprintf(tempstr, "%d", temp);
-    client.publish("/aircond/myroom/temp", tempstr);
-  }
-  else if (strcmp(topic,"/aircond/myroom/getall")==0) {
-    char speedstr[5];
-    char sleepstr[5];
-    char tempstr[5];
-    sprintf(speedstr, "%d", speed);
-    sprintf(sleepstr, "%d", sleep);
-    sprintf(tempstr, "%d", temp);
-    client.publish("/aircond/myroom/state", state);
-    client.publish("/aircond/myroom/mode", mode);
-    client.publish("/aircond/myroom/speed", speedstr);
-    client.publish("/aircond/myroom/swing", swing);
-    client.publish("/aircond/myroom/sleep", sleepstr);
-    client.publish("/aircond/myroom/temp", tempstr);
-  }
-}
-
-
-
 
 void setup() {
   // digitalWrite(4, LOW);
   irsend.begin();
   Serial.begin(115200, SERIAL_8N1, SERIAL_TX_ONLY);
+
+  // Wait for serial to initialize.
+  while(!Serial) { }
+
+  Serial.println("Device Started");
+  Serial.println("-------------------------------------");
+
   setup_wifi();
 
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(callback);
 }
 
+int timeSinceLastRead = 0;
 void loop() {
-
   if (!client.connected()) {
+    startProgram = 0;
     reconnect();
   }
+  // Report every 2 seconds.
+   if(timeSinceLastRead > (DHTLOOP * 1000)) {
+     // Reading temperature or humidity takes about 250 milliseconds!
+     // Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
+     float h = dht.readHumidity();
+     // Read temperature as Celsius (the default)
+     float t = dht.readTemperature();
+     // Read temperature as Fahrenheit (isFahrenheit = true)
+     float f = dht.readTemperature(true);
+
+     // Check if any reads failed and exit early (to try again).
+     if (isnan(h) || isnan(t) || isnan(f)) {
+       Serial.println("Failed to read from DHT sensor!");
+       client.publish("DEBUG/DHT", "Can't read from sensor");
+       timeSinceLastRead = 0;
+       return;
+     }
+
+     // Compute heat index in Fahrenheit (the default)
+     float hif = dht.computeHeatIndex(f, h);
+     // Compute heat index in Celsius (isFahreheit = false)
+     float hic = dht.computeHeatIndex(t, h, false);
+
+     Serial.print("Humidity: ");
+     Serial.print(h);
+     Serial.print(" %\t");
+     Serial.print("Temperature: ");
+     Serial.print(t);
+     Serial.print(" *C ");
+     Serial.print(f);
+     Serial.print(" *F\t");
+     Serial.print("Heat index: ");
+     Serial.print(hic);
+     Serial.print(" *C ");
+     Serial.print(hif);
+     Serial.println(" *F");
+     char measuredstr[15];
+     sprintf(measuredstr, "%d.%d", (int)hic, (int)(hic*100)%100);
+     client.publish("/aircond/myroom/temp/measured", measuredstr);
+
+     timeSinceLastRead = 0;
+   }
+  delay(100);
+  timeSinceLastRead += 100;
+
+  startProgram = 1;
   client.loop();
 }
+
